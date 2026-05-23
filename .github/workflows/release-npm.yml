@@ -1,4 +1,4 @@
-name: Release
+name: Release npm
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
           - major
           - explicit
       version:
-        description: 'Explicit version when bump=explicit (e.g. 0.9.0)'
+        description: 'Explicit version when bump=explicit (e.g. 0.2.0)'
         required: false
         type: string
       dry_run:
@@ -27,7 +27,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release
+  group: release-npm
   cancel-in-progress: false
 
 jobs:
@@ -55,10 +55,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: "latest"
+          bun-version: latest
 
       - name: Compute next version
         id: version
@@ -71,39 +71,43 @@ jobs:
               echo "::error::bump=explicit requires a 'version' input"
               exit 1
             fi
-            python scripts/bump_version.py --explicit "$EXPLICIT_VERSION" --github-output
+            python scripts/bump_version.py \
+              --package-json fli-js/package.json \
+              --explicit "$EXPLICIT_VERSION" \
+              --tag-prefix fli-js-v \
+              --github-output
           else
-            python scripts/bump_version.py --bump "$BUMP" --github-output
+            python scripts/bump_version.py \
+              --package-json fli-js/package.json \
+              --bump "$BUMP" \
+              --tag-prefix fli-js-v \
+              --github-output
           fi
 
       - name: Verify tag doesn't already exist
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          tag="${{ steps.version.outputs.tag }}"
-          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "::error::Tag ${tag} already exists"
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists"
             exit 1
           fi
-          if git ls-remote --tags --exit-code origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "::error::Tag ${tag} already exists on origin"
+          if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists on origin"
             exit 1
           fi
 
       - name: Determine commit range for release notes
         id: range
         run: |
-          prev_tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          prev_tag=$(git tag --list 'fli-js-v*' --sort=-v:refname | head -n1)
           if [ -n "$prev_tag" ]; then
             range="${prev_tag}..HEAD"
             echo "prev_tag=${prev_tag}" >> "$GITHUB_OUTPUT"
           else
-            # First release with this workflow: walk back to the last manual "Bump version" commit
-            prev=$(git log --grep='^Bump version' -n1 --format='%H' || true)
-            if [ -n "$prev" ]; then
-              range="${prev}..HEAD"
-              echo "prev_commit=${prev}" >> "$GITHUB_OUTPUT"
-            else
-              range="HEAD"
-            fi
+            # First fli-js release: scope notes to the commits that ever
+            # touched the JS package or its shared data dir.
+            range="HEAD"
           fi
           echo "range=${range}" >> "$GITHUB_OUTPUT"
           echo "Using range: ${range}"
@@ -115,45 +119,54 @@ jobs:
           PREV_TAG: ${{ steps.range.outputs.prev_tag }}
         run: |
           {
-            echo "## What's Changed"
+            echo "## What's Changed (fli-js)"
             echo
             if [ "$RANGE" = "HEAD" ]; then
-              git log --pretty=format:'- %s (%h)' HEAD
+              git log --pretty=format:'- %s (%h)' HEAD -- fli-js data
             else
-              git log --pretty=format:'- %s (%h)' "$RANGE"
+              git log --pretty=format:'- %s (%h)' "$RANGE" -- fli-js data
             fi
             echo
             echo
             if [ -n "$PREV_TAG" ]; then
-              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...v${NEW_VERSION}"
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...fli-js-v${NEW_VERSION}"
             fi
           } > release_notes.md
           echo "----- release_notes.md -----"
           cat release_notes.md
           echo "----------------------------"
 
-      - name: Update pyproject.toml version
+      - name: Update fli-js/package.json version
         if: ${{ !inputs.dry_run }}
         env:
           BUMP: ${{ inputs.bump }}
           EXPLICIT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$BUMP" = "explicit" ]; then
-            python scripts/bump_version.py --explicit "$EXPLICIT_VERSION" --write
+            python scripts/bump_version.py \
+              --package-json fli-js/package.json \
+              --explicit "$EXPLICIT_VERSION" \
+              --tag-prefix fli-js-v \
+              --write
           else
-            python scripts/bump_version.py --bump "$BUMP" --write
+            python scripts/bump_version.py \
+              --package-json fli-js/package.json \
+              --bump "$BUMP" \
+              --tag-prefix fli-js-v \
+              --write
           fi
 
-      - name: Refresh uv.lock
+      - name: Refresh bun.lock
         if: ${{ !inputs.dry_run }}
-        run: uv lock
+        working-directory: fli-js
+        run: bun install
 
       - name: Commit and tag
         if: ${{ !inputs.dry_run }}
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          git add pyproject.toml uv.lock
+          git add fli-js/package.json fli-js/bun.lock
           if git diff --cached --quiet; then
             echo "::error::No version changes staged; aborting."
             exit 1
@@ -188,7 +201,7 @@ jobs:
               echo "::error::Tag push failed after 4 attempts."
               echo "::error::The release commit was already pushed to main; recover by running:"
               echo "::error::  git fetch origin && git push origin ${TAG}"
-              echo "::error::then create the GitHub Release for ${TAG} manually (publish.yml will fire)."
+              echo "::error::then create the GitHub Release for ${TAG} manually (publish-npm.yml will fire)."
               exit 1
             fi
             sleep $((2 ** attempt))
@@ -218,7 +231,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           {
-            echo "### Dry run"
+            echo "### Dry run (fli-js / npm)"
             echo
             echo "- Current version: \`${CURRENT}\`"
             echo "- Next version: \`${NEW_VERSION}\`"
@@ -229,58 +242,13 @@ jobs:
             cat release_notes.md
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Run the standard test suite against the new tag before publishing.
-  # Called via workflow_call (not publish), so no OIDC/attestation concerns.
-  test:
+  publish:
     needs: release
     if: ${{ needs.release.outputs.did_release == 'true' }}
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/publish-npm.yml
     with:
-      ref: ${{ needs.release.outputs.tag }}
-
-  publish:
-    needs: [ release, test ]
-    if: ${{ needs.release.outputs.did_release == 'true' }}
-    runs-on: ubuntu-latest
+      environment: npm
     permissions:
       contents: read
       id-token: write
-    environment:
-      name: pypi
-      url: https://pypi.org/p/flights
-    steps:
-      # IMPORTANT: build and publish steps live here (inline) rather than
-      # invoking publish.yml via workflow_call. PyPI's Trusted Publishing
-      # attestations are incompatible with reusable workflow chains -- the
-      # OIDC token's job_workflow_ref points at the called workflow while
-      # the Sigstore cert's Build Config URI points at the top-level
-      # workflow. PyPI ties both to the same publisher, so chained
-      # publishes always fail attestation verification.
-      # See https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github
-      - name: Checkout release tag
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Build release distributions
-        run: uv build
-
-      - name: Check package
-        run: uv run twine check dist/*
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
-
+    secrets: inherit

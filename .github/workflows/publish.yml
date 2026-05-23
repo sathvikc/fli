@@ -32,7 +32,10 @@ permissions:
 
 jobs:
   test:
-    uses: ./.github/workflows/test.yml
+    # Skip when a release for the JS package (tag fli-js-v*) fires this
+    # workflow — that's publish-npm.yml's job.
+    if: ${{ github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'fli-js-v') }}
+    uses: ./.github/workflows/ci.yml
 
   release-build:
     needs: [ test ]
@@ -71,9 +74,10 @@ jobs:
     # Only auto-publish on release events created by humans (manual fallback).
     # release.yml publishes inline and creates its tag/Release via the bot, so
     # excluding github-actions[bot] prevents a second, racing publish that would
-    # 400 with "File already exists". workflow_dispatch publishes only when the
-    # operator explicitly selects the pypi environment.
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.environment == 'pypi') || (github.event_name == 'release' && github.actor != 'github-actions[bot]') }}
+    # 400 with "File already exists". JS-package releases (tag fli-js-v*) are
+    # handled by publish-npm.yml and must be skipped here. workflow_dispatch
+    # publishes only when the operator explicitly selects the pypi environment.
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.environment == 'pypi') || (github.event_name == 'release' && github.actor != 'github-actions[bot]' && !startsWith(github.event.release.tag_name, 'fli-js-v')) }}
     permissions:
       id-token: write
 
